@@ -704,7 +704,6 @@ public:
             desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
             desc.debugName = "ColorBuffer";
             m_ColorBuffer = GetDevice()->createTexture(desc);
-
             nvrhi::BindingSetDesc bindingSetDesc;
             bindingSetDesc.bindings = {
                 nvrhi::BindingSetItem::ConstantBuffer(0, m_ConstantBuffer),

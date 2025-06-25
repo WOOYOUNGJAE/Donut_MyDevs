@@ -22,7 +22,7 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-project(donut_examples)
+project(Donut_MyDevs)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,6 +49,9 @@ add_subdirectory(examples/basic_triangle)
 add_subdirectory(examples/vertex_buffer)
 add_subdirectory(examples/deferred_shading)
 add_subdirectory(examples/headless)
+add_subdirectory(MyDevs/initial_project)
+add_subdirectory(MyDevs/playground)
+add_subdirectory(MyDevs/geometry_pipeline)
 
 if (NVRHI_WITH_DX12)
     execute_process(COMMAND ${DXC_PATH} "-T cs_6_8" "ver_test.hlsl" OUTPUT_QUIET RESULT_VARIABLE DXC_SM_6_8 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/examples/work_graphs")
