@@ -1,35 +1,22 @@
-/*
-* Copyright (c) 2014-2021, NVIDIA CORPORATION. All rights reserved.
-*
-* Permission is hereby granted, free of charge, to any person obtaining a
-* copy of this software and associated documentation files (the "Software"),
-* to deal in the Software without restriction, including without limitation
-* the rights to use, copy, modify, merge, publish, distribute, sublicense,
-* and/or sell copies of the Software, and to permit persons to whom the
-* Software is furnished to do so, subject to the following conditions:
-*
-* The above copyright notice and this permission notice shall be included in
-* all copies or substantial portions of the Software.
-*
-* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-* DEALINGS IN THE SOFTWARE.
-*/
+#pragma once
 
-#include <donut/app/ApplicationBase.h>
 #include <donut/engine/ShaderFactory.h>
 #include <donut/engine/TextureCache.h>
 #include <donut/engine/CommonRenderPasses.h>
+#include <donut/engine/Scene.h>
 #include <donut/app/DeviceManager.h>
 #include <donut/core/log.h>
 #include <donut/core/vfs/VFS.h>
 #include <nvrhi/utils.h>
+#include "donut/app/ApplicationBase.h"
+#include <donut/app/DeviceManager.h>
 
 using namespace donut;
+using namespace donut::math;
+using namespace donut::app;
+using namespace donut::vfs;
+using namespace donut::engine;
+//using namespace donut::render;
 
 static const char* g_WindowTitle = "Donut Example: Vertex Buffer";
 
@@ -86,10 +73,11 @@ static const math::float3 g_RotationAxes[c_NumViews] = {
     math::float3(1.f, 0.f, 0.f)
 };
 
-class InitialProject : public app::IRenderPass
+class GeometryPipeline : public app::IRenderPass
 {
 private:
     nvrhi::ShaderHandle m_VertexShader;
+    nvrhi::ShaderHandle m_GeometryShader;
     nvrhi::ShaderHandle m_PixelShader;
     nvrhi::BufferHandle m_ConstantBuffer;
     nvrhi::BufferHandle m_VertexBuffer;
@@ -104,36 +92,15 @@ private:
 
 public:
     using IRenderPass::IRenderPass;
-
-    // This example uses a single large constant buffer with multiple views to draw multiple versions of the same model.
-    // The alignment and size of partially bound constant buffers must be a multiple of 256 bytes,
-    // so define a struct that represents one constant buffer entry or slice for one draw call.
-    struct ConstantBufferEntry
+    explicit GeometryPipeline(DeviceManager* deviceManager, std::shared_ptr<ShaderFactory> shaderFactory): IRenderPass(deviceManager)
     {
-        dm::float4x4 viewProjMatrix;
-        float padding[16 * 3];
-    };
-
-    static_assert(sizeof(ConstantBufferEntry) == nvrhi::c_ConstantBufferOffsetSizeAlignment, "sizeof(ConstantBufferEntry) must be 256 bytes");
-
-    bool Init()
-    {
-        auto nativeFS = std::make_shared<vfs::NativeFileSystem>();
-
-        std::filesystem::path frameworkShaderPath = app::GetDirectoryWithExecutable() / "shaders/framework" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
-        std::filesystem::path appShaderPath = app::GetDirectoryWithExecutable() / "shaders/vertex_buffer" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
-
-        std::shared_ptr<vfs::RootFileSystem> rootFS = std::make_shared<vfs::RootFileSystem>();
-        rootFS->mount("/shaders/donut", frameworkShaderPath);
-        rootFS->mount("/shaders/app", appShaderPath);
-
-        std::shared_ptr<engine::ShaderFactory> shaderFactory = std::make_shared<engine::ShaderFactory>(GetDevice(), rootFS, "/shaders");
         m_VertexShader = shaderFactory->CreateShader("app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+        //m_GeometryShader = shaderFactory->CreateShader("app/shaders.hlsl", "main_gs", nullptr, nvrhi::ShaderType::Geometry);
         m_PixelShader = shaderFactory->CreateShader("app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
-        if (!m_VertexShader || !m_PixelShader)
+        if (!m_VertexShader/* || !m_GeometryShader*/ || !m_PixelShader)
         {
-            return false;
+            return;
         }
 
         m_ConstantBuffer = GetDevice()->createBuffer(nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(ConstantBufferEntry) * c_NumViews, "ConstantBuffer")
@@ -194,7 +161,7 @@ public:
         if (!texture->texture)
         {
             log::error("Couldn't load the texture");
-            return false;
+            return;
         }
 
         // Create a single binding layout and multiple binding sets, one set per view.
@@ -214,12 +181,23 @@ public:
             if (!nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_BindingLayout, m_BindingSets[viewIndex]))
             {
                 log::error("Couldn't create the binding set or layout");
-                return false;
+                return;
             }
         }
-
-        return true;
     }
+
+    // This example uses a single large constant buffer with multiple views to draw multiple versions of the same model.
+    // The alignment and size of partially bound constant buffers must be a multiple of 256 bytes,
+    // so define a struct that represents one constant buffer entry or slice for one draw call.
+    struct ConstantBufferEntry
+    {
+        dm::float4x4 viewProjMatrix;
+        float padding[16 * 3];
+    };
+
+    static_assert(sizeof(ConstantBufferEntry) == nvrhi::c_ConstantBufferOffsetSizeAlignment, "sizeof(ConstantBufferEntry) must be 256 bytes");
+
+    bool Init();
 
     void Animate(float seconds) override
     {
@@ -232,113 +210,51 @@ public:
         m_Pipeline = nullptr;
     }
 
-    void Render(nvrhi::IFramebuffer* framebuffer) override
-    {
-        const nvrhi::FramebufferInfoEx& fbinfo = framebuffer->getFramebufferInfo();
-
-        if (!m_Pipeline)
-        {
-            nvrhi::GraphicsPipelineDesc psoDesc;
-            psoDesc.VS = m_VertexShader;
-            psoDesc.PS = m_PixelShader;
-            psoDesc.inputLayout = m_InputLayout;
-            psoDesc.bindingLayouts = { m_BindingLayout };
-            psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-            psoDesc.renderState.depthStencilState.depthTestEnable = false;
-
-            m_Pipeline = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
-        }
-
-        m_CommandList->open();
-
-        nvrhi::utils::ClearColorAttachment(m_CommandList, framebuffer, 0, nvrhi::Color(0.f));
-
-        // Fill out the constant buffer slices for multiple views of the model.
-        ConstantBufferEntry modelConstants[c_NumViews];
-        for (uint32_t viewIndex = 0; viewIndex < c_NumViews; ++viewIndex)
-        {
-            math::affine3 viewMatrix = math::rotation(normalize(g_RotationAxes[viewIndex]), m_Rotation)
-                * math::yawPitchRoll(0.f, math::radians(-30.f), 0.f)
-                * math::translation(math::float3(0, 0, 2));
-            math::float4x4 projMatrix = math::perspProjD3DStyle(math::radians(60.f), float(fbinfo.width) / float(fbinfo.height), 0.1f, 10.f);
-            math::float4x4 viewProjMatrix = math::affineToHomogeneous(viewMatrix) * projMatrix;
-            modelConstants[viewIndex].viewProjMatrix = viewProjMatrix;
-        }
-
-        // Upload all constant buffer slices at once.
-        m_CommandList->writeBuffer(m_ConstantBuffer, modelConstants, sizeof(modelConstants));
-
-        for (uint32_t viewIndex = 0; viewIndex < c_NumViews; ++viewIndex)
-        {
-            nvrhi::GraphicsState state;
-            // Pick the right binding set for this view.
-            state.bindings = { m_BindingSets[viewIndex] };
-            state.indexBuffer = { m_IndexBuffer, nvrhi::Format::R32_UINT, 0 };
-            // Bind the vertex buffers in reverse order to test the NVRHI implementation of binding slots
-            state.vertexBuffers = {
-                { m_VertexBuffer, 1, offsetof(Vertex, uv) },
-                { m_VertexBuffer, 0, offsetof(Vertex, position) }
-            };
-            state.pipeline = m_Pipeline;
-            state.framebuffer = framebuffer;
-
-            // Construct the viewport so that all viewports form a grid.
-            const float width = float(fbinfo.width);
-            const float height = float(fbinfo.height);
-            const float left = 0;
-            const float top = 0;
-
-            const nvrhi::Viewport viewport = nvrhi::Viewport(left, left + width, top, top + height, 0.f, 1.f);
-            state.viewport.addViewportAndScissorRect(viewport);
-
-            // Update the pipeline, bindings, and other state.
-            m_CommandList->setGraphicsState(state);
-
-            // Draw the model.
-            nvrhi::DrawArguments args;
-            args.vertexCount = dim(g_Indices);
-            m_CommandList->drawIndexed(args);
-        }
-
-        m_CommandList->close();
-        GetDevice()->executeCommandList(m_CommandList);
-    }
+    void Render(nvrhi::IFramebuffer* framebuffer) override;
 };
 
-#ifdef WIN32
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
-#else
-int main(int __argc, const char** __argv)
-#endif
+class GeometryPipelineDemo : public donut::app::ApplicationBase
 {
-    nvrhi::GraphicsAPI api = app::GetGraphicsAPIFromCommandLine(__argc, __argv);
-    app::DeviceManager* deviceManager = app::DeviceManager::Create(api);
+private:
+    std::shared_ptr<RootFileSystem>     m_RootFs;
+    std::shared_ptr<NativeFileSystem>   m_NativeFs;
+    std::vector<std::string>            m_SceneFilesAvailable;
+    std::string                         m_CurrentSceneName;
+    std::filesystem::path               m_SceneDir;
+    std::shared_ptr<Scene>				m_Scene;
+    std::shared_ptr<ShaderFactory>      m_ShaderFactory;
+    std::unique_ptr<GeometryPipeline>   m_RenderPass;
 
-    app::DeviceCreationParameters deviceParams;
-#ifdef _DEBUG
-    deviceParams.enableDebugRuntime = true;
-    deviceParams.enableNvrhiValidationLayer = true;
-#endif
+    nvrhi::CommandListHandle            m_CommandList;
 
-    if (!deviceManager->CreateWindowDeviceAndSwapChain(deviceParams, g_WindowTitle))
+
+public:
+    GeometryPipelineDemo(DeviceManager* deviceManager, const std::string& sceneName)
+        : ApplicationBase(deviceManager)
     {
-        log::fatal("Cannot initialize a graphics device with the requested parameters");
-        return 1;
-    }
+        m_RootFs = std::make_shared<RootFileSystem>();
 
-    {
-        InitialProject example(deviceManager);
-        if (example.Init())
+        std::filesystem::path mediaDir = app::GetDirectoryWithExecutable().parent_path() / "media";
+        std::filesystem::path frameworkShaderDir = app::GetDirectoryWithExecutable() / "shaders/framework" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
+
+        m_RootFs->mount("/media", mediaDir);
+        m_RootFs->mount("/shaders/donut", frameworkShaderDir);
+
+        m_NativeFs = std::make_shared<NativeFileSystem>();
+
+        m_SceneDir = mediaDir / "glTF-Sample-Assets/Models/";
+        m_SceneFilesAvailable = FindScenes(*m_NativeFs, m_SceneDir);
+
+        if (sceneName.empty() && m_SceneFilesAvailable.empty())
         {
-            deviceManager->AddRenderPassToBack(&example);
-            deviceManager->RunMessageLoop();
-            deviceManager->RemoveRenderPass(&example);
+            log::fatal("No scene file found in media folder '%s'\n"
+                "Please make sure that folder contains valid scene files.", m_SceneDir.generic_string().c_str());
         }
+
+        m_ShaderFactory = std::make_shared<ShaderFactory>(GetDevice(), m_RootFs, "/shaders");
+        m_RenderPass = std::make_unique<GeometryPipeline>(deviceManager);
+
+        m_CommandList = GetDevice()->createCommandList();
+
     }
-
-    deviceManager->Shutdown();
-
-    delete deviceManager;
-
-    return 0;
-}
+};

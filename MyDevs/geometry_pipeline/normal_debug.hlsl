@@ -33,10 +33,11 @@
 #define VK_BINDING(reg,dset) 
 #endif
 
+
 struct InstanceConstants
 {
-    uint instance;
-    uint geometryInMesh;
+	uint instance;
+	uint geometryInMesh;
 };
 
 ConstantBuffer<PlanarViewConstants> g_View : register(b0);
@@ -49,11 +50,16 @@ SamplerState s_MaterialSampler : register(s0);
 VK_BINDING(0, 1) ByteAddressBuffer t_BindlessBuffers[] : register(t0, space1);
 VK_BINDING(1, 1) Texture2D t_BindlessTextures[] : register(t0, space2);
 
+struct VSOutput
+{
+    float4 position : POSITION0;
+    float3 normal : NORMAL0;
+};
+
 void main_vs(
-    in uint i_vertexID : SV_VertexID,
-    out float4 o_position : SV_Position,
-    out float2 o_uv : TEXCOORD,
-    out uint o_material : MATERIAL)
+	in uint i_vertexID : SV_VertexID,
+    out VSOutput vsOutput
+)
 {
     InstanceData instance = t_InstanceData[g_Instance.instance];
     GeometryData geometry = t_GeometryData[instance.firstGeometryIndex + g_Instance.geometryInMesh];
@@ -63,38 +69,53 @@ void main_vs(
 
     uint index = indexBuffer.Load(geometry.indexOffset + i_vertexID * 4);
 
-    float2 texcoord = geometry.texCoord1Offset == ~0u ? 0 : asfloat(vertexBuffer.Load2(geometry.texCoord1Offset + index * 8));
-    float3 objectSpacePosition = asfloat(vertexBuffer.Load3(geometry.positionOffset + index * 12));;
+    float4 objectSpacePosition = float4(asfloat(vertexBuffer.Load3(geometry.positionOffset + index * c_SizeOfPosition)), 1.0);
+    float3 objectSpaceNormal = asfloat(vertexBuffer.Load3(geometry.normalOffset + index * c_SizeOfNormal));
 
-    float3 worldSpacePosition = mul(instance.transform, float4(objectSpacePosition, 1.0)).xyz;
-    float4 clipSpacePosition = mul(float4(worldSpacePosition, 1.0), g_View.matWorldToClip);
+    vsOutput.position = objectSpacePosition;
+    vsOutput.normal = objectSpaceNormal;
+}
 
-    o_uv = texcoord;
-    o_position = clipSpacePosition;
-    o_material = geometry.materialIndex;
+struct GSOutput
+{
+    float4 position : SV_POSITION;
+    float3 color : COLOR0;
+};
+
+[maxvertexcount(6)]
+void main_gs(
+    triangle VSOutput i_gsIn[3],
+    inout LineStream<GSOutput> outStream
+)
+{
+    float normalLength = 0.02;
+    float3x4 transform = t_InstanceData[g_Instance.instance].transform;
+
+    for (int i = 0; i < 3; ++i)
+    {
+        //float3 pos
+        float3 localPos = i_gsIn[i].position.xyz;
+        float3 localNormal = i_gsIn[i].normal.xyz;
+
+        // point of line (p0)
+        GSOutput output = (GSOutput)0;
+        output.position = mul(mul(float4(localPos, 1.0), transform), g_View.matWorldToClip);
+        output.color = float3(1.0, 0.0, 0.0);
+        outStream.Append(output);
+
+        // point of line (p1)
+        output.position = mul(mul(float4(localPos + localNormal * normalLength, 1.0), transform), g_View.matWorldToClip);
+        output.color = float3(0.0, 0.0, 1.0);
+        outStream.Append(output);
+
+        outStream.RestartStrip();
+    }
 }
 
 void main_ps(
-    in float4 i_position : SV_Position,
-    in float2 i_uv : TEXCOORD, 
-    nointerpolation in uint i_material : MATERIAL, 
-    out float4 o_color : SV_Target0)
+    float3 i_color : COLOR0,
+    out float4 o_color : SV_Target0
+)
 {
-    MaterialConstants material = t_MaterialConstants[i_material];
-
-    float3 diffuse = material.baseOrDiffuseColor;
-
-    if (material.baseOrDiffuseTextureIndex >= 0)
-    {
-        Texture2D diffuseTexture = t_BindlessTextures[material.baseOrDiffuseTextureIndex];
-
-        float4 diffuseTextureValue = diffuseTexture.Sample(s_MaterialSampler, i_uv);
-        
-        if (material.domain == MaterialDomain_AlphaTested)
-            clip(diffuseTextureValue.a - material.alphaCutoff);
-
-        diffuse *= diffuseTextureValue.rgb;
-    }
-
-    o_color = float4(diffuse.rgb, 1);
+    o_color = float4(i_color, 1.0);
 }

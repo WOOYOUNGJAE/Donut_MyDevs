@@ -20,285 +20,323 @@
 * DEALINGS IN THE SOFTWARE.
 */
 
+#include <donut/render/GBufferFillPass.h>
+#include <donut/render/DrawStrategy.h>
 #include <donut/app/ApplicationBase.h>
+#include <donut/app/Camera.h>
 #include <donut/engine/ShaderFactory.h>
-#include <donut/engine/TextureCache.h>
 #include <donut/engine/CommonRenderPasses.h>
+#include <donut/engine/TextureCache.h>
+#include <donut/engine/Scene.h>
+#include <donut/engine/DescriptorTableManager.h>
+#include <donut/engine/BindingCache.h>
 #include <donut/app/DeviceManager.h>
 #include <donut/core/log.h>
 #include <donut/core/vfs/VFS.h>
+#include <donut/core/math/math.h>
 #include <nvrhi/utils.h>
 
 using namespace donut;
+using namespace donut::math;
 
-static const char* g_WindowTitle = "Donut Example: Vertex Buffer";
+#include <donut/shaders/view_cb.h>
 
-struct Vertex
+static const char* g_WindowTitle = "My Devs : Geometry Pipeline";
+
+namespace MyDevs
 {
-    math::float3 position;
-    math::float2 uv;
-};
 
-static const Vertex g_Vertices[] = {
-    { {-0.5f,  0.5f, -0.5f}, {0.0f, 0.0f} }, // front face
-    { { 0.5f, -0.5f, -0.5f}, {1.0f, 1.0f} },
-    { {-0.5f, -0.5f, -0.5f}, {0.0f, 1.0f} },
-    { { 0.5f,  0.5f, -0.5f}, {1.0f, 0.0f} },
-
-    { { 0.5f, -0.5f, -0.5f}, {0.0f, 1.0f} }, // right side face
-    { { 0.5f,  0.5f,  0.5f}, {1.0f, 0.0f} },
-    { { 0.5f, -0.5f,  0.5f}, {1.0f, 1.0f} },
-    { { 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f} },
-
-    { {-0.5f,  0.5f,  0.5f}, {0.0f, 0.0f} }, // left side face
-    { {-0.5f, -0.5f, -0.5f}, {1.0f, 1.0f} },
-    { {-0.5f, -0.5f,  0.5f}, {0.0f, 1.0f} },
-    { {-0.5f,  0.5f, -0.5f}, {1.0f, 0.0f} },
-
-    { { 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f} }, // back face
-    { {-0.5f, -0.5f,  0.5f}, {1.0f, 1.0f} },
-    { { 0.5f, -0.5f,  0.5f}, {0.0f, 1.0f} },
-    { {-0.5f,  0.5f,  0.5f}, {1.0f, 0.0f} },
-
-    { {-0.5f,  0.5f, -0.5f}, {0.0f, 1.0f} }, // top face
-    { { 0.5f,  0.5f,  0.5f}, {1.0f, 0.0f} },
-    { { 0.5f,  0.5f, -0.5f}, {1.0f, 1.0f} },
-    { {-0.5f,  0.5f,  0.5f}, {0.0f, 0.0f} },
-
-    { { 0.5f, -0.5f,  0.5f}, {1.0f, 1.0f} }, // bottom face
-    { {-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f} },
-    { { 0.5f, -0.5f, -0.5f}, {1.0f, 0.0f} },
-    { {-0.5f, -0.5f,  0.5f}, {0.0f, 1.0f} },
-};
-
-static const uint32_t g_Indices[] = {
-     0,  1,  2,   0,  3,  1, // front face
-     4,  5,  6,   4,  7,  5, // left face
-     8,  9, 10,   8, 11,  9, // right face
-    12, 13, 14,  12, 15, 13, // back face
-    16, 17, 18,  16, 19, 17, // top face
-    20, 21, 22,  20, 23, 21, // bottom face
-};
-
-constexpr uint32_t c_NumViews = 1;
-
-static const math::float3 g_RotationAxes[c_NumViews] = {
-    math::float3(1.f, 0.f, 0.f)
-};
-
-class GeometryPipeline : public app::IRenderPass
-{
-private:
-    nvrhi::ShaderHandle m_VertexShader;
-    nvrhi::ShaderHandle m_GeometryShader;
-    nvrhi::ShaderHandle m_PixelShader;
-    nvrhi::BufferHandle m_ConstantBuffer;
-    nvrhi::BufferHandle m_VertexBuffer;
-    nvrhi::BufferHandle m_IndexBuffer;
-    nvrhi::TextureHandle m_Texture;
-    nvrhi::InputLayoutHandle m_InputLayout;
-    nvrhi::BindingLayoutHandle m_BindingLayout;
-    nvrhi::BindingSetHandle m_BindingSets[c_NumViews];
-    nvrhi::GraphicsPipelineHandle m_Pipeline;
-    nvrhi::CommandListHandle m_CommandList;
-    float m_Rotation = 0.f;
-
-public:
-    using IRenderPass::IRenderPass;
-
-    // This example uses a single large constant buffer with multiple views to draw multiple versions of the same model.
-    // The alignment and size of partially bound constant buffers must be a multiple of 256 bytes,
-    // so define a struct that represents one constant buffer entry or slice for one draw call.
-    struct ConstantBufferEntry
+    struct RenderingPassBase
     {
-        dm::float4x4 viewProjMatrix;
-        float padding[16 * 3];
+        nvrhi::BindingLayoutHandle bindingLayout;
+        nvrhi::BindingLayoutHandle bindlessLayout;
+        nvrhi::BindingSetHandle bindingSet;
+        nvrhi::ShaderHandle vertexShader;
+        nvrhi::ShaderHandle pixelShader;
+        nvrhi::GraphicsPipelineHandle renderingPipeline;
     };
 
-    static_assert(sizeof(ConstantBufferEntry) == nvrhi::c_ConstantBufferOffsetSizeAlignment, "sizeof(ConstantBufferEntry) must be 256 bytes");
+    struct ForwardPass : RenderingPassBase
+    {
+        ForwardPass(nvrhi::IDevice* device, std::shared_ptr<engine::ShaderFactory> shaderFactory, std::shared_ptr<engine::
+            CommonRenderPasses> commonPasses, const nvrhi::BindingSetDesc& bindingSetDesc)
+        {
+            vertexShader = shaderFactory->CreateShader("/shaders/app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+            pixelShader = shaderFactory->CreateShader("/shaders/app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+
+            nvrhi::BindlessLayoutDesc bindlessLayoutDesc;
+            bindlessLayoutDesc.visibility = nvrhi::ShaderType::All;
+            bindlessLayoutDesc.firstSlot = 0;
+            bindlessLayoutDesc.maxCapacity = 1024;
+            bindlessLayoutDesc.registerSpaces = {
+                nvrhi::BindingLayoutItem::RawBuffer_SRV(1),
+                nvrhi::BindingLayoutItem::Texture_SRV(2)
+            };
+            bindlessLayout = device->createBindlessLayout(bindlessLayoutDesc);
+
+            nvrhi::utils::CreateBindingSetAndLayout(device, nvrhi::ShaderType::All, 0, bindingSetDesc, bindingLayout, bindingSet);
+        }		
+    };
+    struct GeometryPass : RenderingPassBase
+    {
+        nvrhi::ShaderHandle geometryShader;
+        GeometryPass(nvrhi::IDevice* device, std::shared_ptr<engine::ShaderFactory> shaderFactory, std::shared_ptr<engine::
+            CommonRenderPasses> commonPasses, const nvrhi::BindingSetDesc& bindingSetDesc)
+        {
+            vertexShader = shaderFactory->CreateShader("/shaders/app/normal_debug.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+            pixelShader = shaderFactory->CreateShader("/shaders/app/normal_debug.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+
+            nvrhi::BindlessLayoutDesc bindlessLayoutDesc;
+            bindlessLayoutDesc.visibility = nvrhi::ShaderType::All;
+            bindlessLayoutDesc.firstSlot = 0;
+            bindlessLayoutDesc.maxCapacity = 1024;
+            bindlessLayoutDesc.registerSpaces = {
+                nvrhi::BindingLayoutItem::RawBuffer_SRV(1),
+                nvrhi::BindingLayoutItem::Texture_SRV(2)
+            };
+            bindlessLayout = device->createBindlessLayout(bindlessLayoutDesc);
+
+            nvrhi::utils::CreateBindingSetAndLayout(device, nvrhi::ShaderType::All, 0, bindingSetDesc, bindingLayout, bindingSet);
+        }		
+    };
+
+};
+class BindlessRendering : public app::ApplicationBase
+{
+private:
+    std::shared_ptr<vfs::RootFileSystem> m_RootFS;
+
+    nvrhi::CommandListHandle m_CommandList;
+    nvrhi::BindingLayoutHandle m_BindingLayout;
+    nvrhi::BindingLayoutHandle m_BindlessLayout;
+    nvrhi::BindingSetHandle m_BindingSet;
+    nvrhi::ShaderHandle m_VertexShader;
+    nvrhi::ShaderHandle m_PixelShader;
+    nvrhi::GraphicsPipelineHandle m_ForwardPassPipeline;
+    nvrhi::GraphicsPipelineHandle m_GeometryPassPipeline;
+    std::unique_ptr<MyDevs::ForwardPass> m_ForwardPass;
+
+    nvrhi::BufferHandle m_ViewConstants;
+
+    nvrhi::TextureHandle m_DepthBuffer;
+    std::vector<nvrhi::FramebufferHandle> m_Framebuffers;
+
+    std::shared_ptr<engine::ShaderFactory> m_ShaderFactory;
+    std::unique_ptr<engine::Scene> m_Scene;
+    std::shared_ptr<engine::DescriptorTableManager> m_DescriptorTableManager;
+    std::unique_ptr<engine::BindingCache> m_BindingCache;
+
+    app::FirstPersonCamera m_Camera;
+    engine::PlanarView m_View;
+
+public:
+    using ApplicationBase::ApplicationBase;
 
     bool Init()
     {
-        auto nativeFS = std::make_shared<vfs::NativeFileSystem>();
-
+        std::filesystem::path sceneFileName = app::GetDirectoryWithExecutable().parent_path() / "media/glTF-Sample-Assets/Models/Sponza/glTF/Sponza.gltf";
         std::filesystem::path frameworkShaderPath = app::GetDirectoryWithExecutable() / "shaders/framework" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
-        std::filesystem::path appShaderPath = app::GetDirectoryWithExecutable() / "shaders/vertex_buffer" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
+        std::filesystem::path appShaderPath = app::GetDirectoryWithExecutable() / "shaders/geometry_pipeline" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
 
-        std::shared_ptr<vfs::RootFileSystem> rootFS = std::make_shared<vfs::RootFileSystem>();
-        rootFS->mount("/shaders/donut", frameworkShaderPath);
-        rootFS->mount("/shaders/app", appShaderPath);
+        m_RootFS = std::make_shared<vfs::RootFileSystem>();
+        m_RootFS->mount("/shaders/donut", frameworkShaderPath);
+        m_RootFS->mount("/shaders/app", appShaderPath);
 
-        std::shared_ptr<engine::ShaderFactory> shaderFactory = std::make_shared<engine::ShaderFactory>(GetDevice(), rootFS, "/shaders");
-        m_VertexShader = shaderFactory->CreateShader("app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-        m_PixelShader = shaderFactory->CreateShader("app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_ShaderFactory = std::make_shared<engine::ShaderFactory>(GetDevice(), m_RootFS, "/shaders");
+        m_CommonPasses = std::make_shared<engine::CommonRenderPasses>(GetDevice(), m_ShaderFactory);
+        m_BindingCache = std::make_unique<engine::BindingCache>(GetDevice());
 
-        if (!m_VertexShader || !m_PixelShader)
-        {
-            return false;
-        }
+        m_VertexShader = m_ShaderFactory->CreateShader("/shaders/app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+        m_PixelShader = m_ShaderFactory->CreateShader("/shaders/app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
-        m_ConstantBuffer = GetDevice()->createBuffer(nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(ConstantBufferEntry) * c_NumViews, "ConstantBuffer")
-            .setInitialState(nvrhi::ResourceStates::ConstantBuffer).setKeepInitialState(true));
-
-        nvrhi::VertexAttributeDesc attributes[] = {
-            nvrhi::VertexAttributeDesc()
-                .setName("POSITION")
-                .setFormat(nvrhi::Format::RGB32_FLOAT)
-                .setOffset(0)
-                .setBufferIndex(0)
-                .setElementStride(sizeof(Vertex)),
-            nvrhi::VertexAttributeDesc()
-                .setName("UV")
-                .setFormat(nvrhi::Format::RG32_FLOAT)
-                .setOffset(0)
-                .setBufferIndex(1)
-                .setElementStride(sizeof(Vertex)),
+        nvrhi::BindlessLayoutDesc bindlessLayoutDesc;
+        bindlessLayoutDesc.visibility = nvrhi::ShaderType::All;
+        bindlessLayoutDesc.firstSlot = 0;
+        bindlessLayoutDesc.maxCapacity = 1024;
+        bindlessLayoutDesc.registerSpaces = {
+            nvrhi::BindingLayoutItem::RawBuffer_SRV(1),
+            nvrhi::BindingLayoutItem::Texture_SRV(2)
         };
-        m_InputLayout = GetDevice()->createInputLayout(attributes, uint32_t(std::size(attributes)), m_VertexShader);
+        m_BindlessLayout = GetDevice()->createBindlessLayout(bindlessLayoutDesc);
 
+        m_DescriptorTableManager = std::make_shared<engine::DescriptorTableManager>(GetDevice(), m_BindlessLayout);
 
-        engine::CommonRenderPasses commonPasses(GetDevice(), shaderFactory);
-        engine::TextureCache textureCache(GetDevice(), nativeFS, nullptr);
+        auto nativeFS = std::make_shared<vfs::NativeFileSystem>();
+        m_TextureCache = std::make_shared<engine::TextureCache>(GetDevice(), nativeFS, m_DescriptorTableManager);
 
         m_CommandList = GetDevice()->createCommandList();
-        m_CommandList->open();
 
-        nvrhi::BufferDesc vertexBufferDesc;
-        vertexBufferDesc.byteSize = sizeof(g_Vertices);
-        vertexBufferDesc.isVertexBuffer = true;
-        vertexBufferDesc.debugName = "VertexBuffer";
-        vertexBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
-        m_VertexBuffer = GetDevice()->createBuffer(vertexBufferDesc);
+        SetAsynchronousLoadingEnabled(false);
+        BeginLoadingScene(nativeFS, sceneFileName);
 
-        m_CommandList->beginTrackingBufferState(m_VertexBuffer, nvrhi::ResourceStates::CopyDest);
-        m_CommandList->writeBuffer(m_VertexBuffer, g_Vertices, sizeof(g_Vertices));
-        m_CommandList->setPermanentBufferState(m_VertexBuffer, nvrhi::ResourceStates::VertexBuffer);
+        m_Scene->FinishedLoading(GetFrameIndex());
 
-        nvrhi::BufferDesc indexBufferDesc;
-        indexBufferDesc.byteSize = sizeof(g_Indices);
-        indexBufferDesc.isIndexBuffer = true;
-        indexBufferDesc.debugName = "IndexBuffer";
-        indexBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
-        m_IndexBuffer = GetDevice()->createBuffer(indexBufferDesc);
+        m_Camera.LookAt(float3(0.f, 1.8f, 0.f), float3(1.f, 1.8f, 0.f));
+        m_Camera.SetMoveSpeed(3.f);
 
-        m_CommandList->beginTrackingBufferState(m_IndexBuffer, nvrhi::ResourceStates::CopyDest);
-        m_CommandList->writeBuffer(m_IndexBuffer, g_Indices, sizeof(g_Indices));
-        m_CommandList->setPermanentBufferState(m_IndexBuffer, nvrhi::ResourceStates::IndexBuffer);
+        m_ViewConstants = GetDevice()->createBuffer(nvrhi::utils::CreateVolatileConstantBufferDesc(sizeof(PlanarViewConstants), "ViewConstants", engine::c_MaxRenderPassConstantBufferVersions));
 
-        std::filesystem::path textureFileName = app::GetDirectoryWithExecutable().parent_path() / "media/nvidia-logo.png";
-        std::shared_ptr<engine::LoadedTexture> texture = textureCache.LoadTextureFromFile(textureFileName, true, nullptr, m_CommandList);
-        m_Texture = texture->texture;
+        GetDevice()->waitForIdle();
 
-        m_CommandList->close();
-        GetDevice()->executeCommandList(m_CommandList);
+        nvrhi::BindingSetDesc bindingSetDesc;
+        bindingSetDesc.bindings = {
+            nvrhi::BindingSetItem::ConstantBuffer(0, m_ViewConstants), // PlanarViewConstants
+            nvrhi::BindingSetItem::PushConstants(1, sizeof(int2)), // InstanceConstants
+            nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_Scene->GetInstanceBuffer()), // InstanceData
+            nvrhi::BindingSetItem::StructuredBuffer_SRV(1, m_Scene->GetGeometryBuffer()), // GeometryData
+            nvrhi::BindingSetItem::StructuredBuffer_SRV(2, m_Scene->GetMaterialBuffer()), // MaterialConstants
+            nvrhi::BindingSetItem::Sampler(0, m_CommonPasses->m_AnisotropicWrapSampler)
+        };
+        nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_BindingLayout, m_BindingSet);
 
-        if (!texture->texture)
-        {
-            log::error("Couldn't load the texture");
-            return false;
-        }
-
-        // Create a single binding layout and multiple binding sets, one set per view.
-        // The different binding sets use different slices of the same constant buffer.
-        for (uint32_t viewIndex = 0; viewIndex < c_NumViews; ++viewIndex)
-        {
-            nvrhi::BindingSetDesc bindingSetDesc;
-            bindingSetDesc.bindings = {
-                // Note: using viewIndex to construct a buffer range.
-                nvrhi::BindingSetItem::ConstantBuffer(0, m_ConstantBuffer, nvrhi::BufferRange(sizeof(ConstantBufferEntry) * viewIndex, sizeof(ConstantBufferEntry))),
-                // Texutre and sampler are the same for all model views.
-                nvrhi::BindingSetItem::Texture_SRV(0, m_Texture),
-                nvrhi::BindingSetItem::Sampler(0, commonPasses.m_AnisotropicWrapSampler)
-            };
-
-            // Create the binding layout (if it's empty -- so, on the first iteration) and the binding set.
-            if (!nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_BindingLayout, m_BindingSets[viewIndex]))
-            {
-                log::error("Couldn't create the binding set or layout");
-                return false;
-            }
-        }
+        m_ForwardPass = std::make_unique<MyDevs::ForwardPass>(GetDevice(), m_ShaderFactory, m_CommonPasses, bindingSetDesc);
 
         return true;
     }
 
-    void Animate(float seconds) override
+    bool LoadScene(std::shared_ptr<vfs::IFileSystem> fs, const std::filesystem::path& sceneFileName) override
     {
-        m_Rotation += seconds * 1.1f;
+        std::unique_ptr<engine::Scene> scene = std::make_unique<engine::Scene>(GetDevice(),
+            *m_ShaderFactory, fs, m_TextureCache, m_DescriptorTableManager, nullptr);
+
+        if (scene->Load(sceneFileName))
+        {
+            m_Scene = std::move(scene);
+            return true;
+        }
+
+        return false;
+    }
+
+    bool KeyboardUpdate(int key, int scancode, int action, int mods) override
+    {
+        m_Camera.KeyboardUpdate(key, scancode, action, mods);
+        return true;
+    }
+
+    bool MousePosUpdate(double xpos, double ypos) override
+    {
+        m_Camera.MousePosUpdate(xpos, ypos);
+        return true;
+    }
+
+    bool MouseButtonUpdate(int button, int action, int mods) override
+    {
+        m_Camera.MouseButtonUpdate(button, action, mods);
+        return true;
+    }
+
+    void Animate(float fElapsedTimeSeconds) override
+    {
+        m_Camera.Animate(fElapsedTimeSeconds);
         GetDeviceManager()->SetInformativeWindowTitle(g_WindowTitle);
     }
 
     void BackBufferResizing() override
     {
-        m_Pipeline = nullptr;
+        m_DepthBuffer = nullptr;
+        m_Framebuffers.clear();
+        m_ForwardPassPipeline = nullptr;
+        m_GeometryPassPipeline = nullptr;
+        m_BindingCache->Clear();
     }
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
-        const nvrhi::FramebufferInfoEx& fbinfo = framebuffer->getFramebufferInfo();
+        const auto& fbinfo = framebuffer->getFramebufferInfo();
 
-        if (!m_Pipeline)
+        if (!m_DepthBuffer)
         {
-            nvrhi::GraphicsPipelineDesc psoDesc;
-            psoDesc.VS = m_VertexShader;
-            psoDesc.PS = m_PixelShader;
-            psoDesc.inputLayout = m_InputLayout;
-            psoDesc.bindingLayouts = { m_BindingLayout };
-            psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-            psoDesc.renderState.depthStencilState.depthTestEnable = false;
+            nvrhi::TextureDesc textureDesc;
+            textureDesc.format = nvrhi::Format::D24S8;
+            textureDesc.isRenderTarget = true;
+            textureDesc.initialState = nvrhi::ResourceStates::DepthWrite;
+            textureDesc.keepInitialState = true;
+            textureDesc.clearValue = nvrhi::Color(0.f);
+            textureDesc.useClearValue = true;
+            textureDesc.debugName = "DepthBuffer";
+            textureDesc.width = fbinfo.width;
+            textureDesc.height = fbinfo.height;
+            textureDesc.dimension = nvrhi::TextureDimension::Texture2D;
 
-            m_Pipeline = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+            m_DepthBuffer = GetDevice()->createTexture(textureDesc);
         }
+
+        m_Framebuffers.resize(GetDeviceManager()->GetBackBufferCount());
+
+        int const fbindex = GetDeviceManager()->GetCurrentBackBufferIndex();
+        if (!m_Framebuffers[fbindex])
+        {
+            nvrhi::FramebufferDesc framebufferDesc;
+            framebufferDesc.addColorAttachment(framebuffer->getDesc().colorAttachments[0]);
+            framebufferDesc.setDepthAttachment(m_DepthBuffer);
+            m_Framebuffers[fbindex] = GetDevice()->createFramebuffer(framebufferDesc);
+        }
+
+        if (m_ForwardPass->renderingPipeline == nullptr)
+        {
+            nvrhi::GraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.VS = m_ForwardPass->vertexShader;
+            pipelineDesc.PS = m_ForwardPass->pixelShader;
+            pipelineDesc.primType = nvrhi::PrimitiveType::TriangleList;
+            pipelineDesc.bindingLayouts = { m_ForwardPass->bindingLayout, m_ForwardPass->bindlessLayout };
+            pipelineDesc.renderState.depthStencilState.depthTestEnable = true;
+            pipelineDesc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::GreaterOrEqual;
+            pipelineDesc.renderState.rasterState.frontCounterClockwise = true;
+            pipelineDesc.renderState.rasterState.setCullBack();
+            m_ForwardPass->renderingPipeline = GetDevice()->createGraphicsPipeline(pipelineDesc, m_Framebuffers[fbindex]);
+        }
+
+        //if (!m_GeometryPassPipeline)
+        //{
+        //    nvrhi::GraphicsPipelineDesc pipelineDesc;
+        //    pipelineDesc.VS = m_VertexShader;
+        //    pipelineDesc.PS = m_PixelShader;
+        //    pipelineDesc.primType = nvrhi::PrimitiveType::TriangleList;
+        //    pipelineDesc.bindingLayouts = { m_BindingLayout, m_BindlessLayout };
+        //    pipelineDesc.renderState.depthStencilState.depthTestEnable = true;
+        //    pipelineDesc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::GreaterOrEqual;
+        //    pipelineDesc.renderState.rasterState.frontCounterClockwise = true;
+        //    pipelineDesc.renderState.rasterState.setCullBack();
+        //    m_GeometryPassPipeline = GetDevice()->createGraphicsPipeline(pipelineDesc, m_Framebuffers[fbindex]);
+        //}
+
+        nvrhi::Viewport windowViewport(float(fbinfo.width), float(fbinfo.height));
+        m_View.SetViewport(windowViewport);
+        m_View.SetMatrices(m_Camera.GetWorldToViewMatrix(), perspProjD3DStyleReverse(dm::PI_f * 0.25f, windowViewport.width() / windowViewport.height(), 0.1f));
+        m_View.UpdateCache();
 
         m_CommandList->open();
 
-        nvrhi::utils::ClearColorAttachment(m_CommandList, framebuffer, 0, nvrhi::Color(0.f));
+        nvrhi::TextureHandle colorBuffer = framebuffer->getDesc().colorAttachments[0].texture;
+        m_CommandList->clearTextureFloat(colorBuffer, nvrhi::AllSubresources, nvrhi::Color(0.f));
+        m_CommandList->clearDepthStencilTexture(m_DepthBuffer, nvrhi::AllSubresources, true, 0.f, true, 0);
 
-        // Fill out the constant buffer slices for multiple views of the model.
-        ConstantBufferEntry modelConstants[c_NumViews];
-        for (uint32_t viewIndex = 0; viewIndex < c_NumViews; ++viewIndex)
+        PlanarViewConstants viewConstants;
+        m_View.FillPlanarViewConstants(viewConstants);
+        m_CommandList->writeBuffer(m_ViewConstants, &viewConstants, sizeof(viewConstants));
+
+        nvrhi::GraphicsState state;
+        state.pipeline = m_ForwardPass->renderingPipeline;
+        state.framebuffer = m_Framebuffers[fbindex];
+        state.bindings = { m_ForwardPass->bindingSet, m_DescriptorTableManager->GetDescriptorTable() };
+        state.viewport = m_View.GetViewportState();
+        m_CommandList->setGraphicsState(state);
+
+        for (const auto& instance : m_Scene->GetSceneGraph()->GetMeshInstances())
         {
-            math::affine3 viewMatrix = math::rotation(normalize(g_RotationAxes[viewIndex]), m_Rotation)
-                * math::yawPitchRoll(0.f, math::radians(-30.f), 0.f)
-                * math::translation(math::float3(0, 0, 2));
-            math::float4x4 projMatrix = math::perspProjD3DStyle(math::radians(60.f), float(fbinfo.width) / float(fbinfo.height), 0.1f, 10.f);
-            math::float4x4 viewProjMatrix = math::affineToHomogeneous(viewMatrix) * projMatrix;
-            modelConstants[viewIndex].viewProjMatrix = viewProjMatrix;
-        }
+            const auto& mesh = instance->GetMesh();
 
-        // Upload all constant buffer slices at once.
-        m_CommandList->writeBuffer(m_ConstantBuffer, modelConstants, sizeof(modelConstants));
+            for (size_t i = 0; i < mesh->geometries.size(); i++)
+            {
+                int2 constants = int2(instance->GetInstanceIndex(), int(i));
+                m_CommandList->setPushConstants(&constants, sizeof(constants));
 
-        for (uint32_t viewIndex = 0; viewIndex < c_NumViews; ++viewIndex)
-        {
-            nvrhi::GraphicsState state;
-            // Pick the right binding set for this view.
-            state.bindings = { m_BindingSets[viewIndex] };
-            state.indexBuffer = { m_IndexBuffer, nvrhi::Format::R32_UINT, 0 };
-            // Bind the vertex buffers in reverse order to test the NVRHI implementation of binding slots
-            state.vertexBuffers = {
-                { m_VertexBuffer, 1, offsetof(Vertex, uv) },
-                { m_VertexBuffer, 0, offsetof(Vertex, position) }
-            };
-            state.pipeline = m_Pipeline;
-            state.framebuffer = framebuffer;
-
-            // Construct the viewport so that all viewports form a grid.
-            const float width = float(fbinfo.width);
-            const float height = float(fbinfo.height);
-            const float left = 0;
-            const float top = 0;
-
-            const nvrhi::Viewport viewport = nvrhi::Viewport(left, left + width, top, top + height, 0.f, 1.f);
-            state.viewport.addViewportAndScissorRect(viewport);
-
-            // Update the pipeline, bindings, and other state.
-            m_CommandList->setGraphicsState(state);
-
-            // Draw the model.
-            nvrhi::DrawArguments args;
-            args.vertexCount = dim(g_Indices);
-            m_CommandList->drawIndexed(args);
+                nvrhi::DrawArguments args;
+                args.instanceCount = 1;
+                args.vertexCount = mesh->geometries[i]->numIndices;
+                m_CommandList->draw(args);
+            }
         }
 
         m_CommandList->close();
@@ -313,6 +351,12 @@ int main(int __argc, const char** __argv)
 #endif
 {
     nvrhi::GraphicsAPI api = app::GetGraphicsAPIFromCommandLine(__argc, __argv);
+    if (api == nvrhi::GraphicsAPI::D3D11)
+    {
+        log::error("The Bindless Rendering example does not support D3D11.");
+        return 1;
+    }
+
     app::DeviceManager* deviceManager = app::DeviceManager::Create(api);
 
     app::DeviceCreationParameters deviceParams;
@@ -328,7 +372,7 @@ int main(int __argc, const char** __argv)
     }
 
     {
-        GeometryPipeline example(deviceManager);
+        BindlessRendering example(deviceManager);
         if (example.Init())
         {
             deviceManager->AddRenderPassToBack(&example);
