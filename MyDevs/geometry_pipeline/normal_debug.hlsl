@@ -24,6 +24,7 @@
 
 #include <donut/shaders/bindless.h>
 #include <donut/shaders/view_cb.h>
+#include <donut/shaders/packing.hlsli>
 
 #ifdef SPIRV
 #define VK_PUSH_CONSTANT [[vk::push_constant]]
@@ -44,8 +45,6 @@ ConstantBuffer<PlanarViewConstants> g_View : register(b0);
 VK_PUSH_CONSTANT ConstantBuffer<InstanceConstants> g_Instance : register(b1);
 StructuredBuffer<InstanceData> t_InstanceData : register(t0);
 StructuredBuffer<GeometryData> t_GeometryData : register(t1);
-StructuredBuffer<MaterialConstants> t_MaterialConstants : register(t2);
-SamplerState s_MaterialSampler : register(s0);
 
 VK_BINDING(0, 1) ByteAddressBuffer t_BindlessBuffers[] : register(t0, space1);
 VK_BINDING(1, 1) Texture2D t_BindlessTextures[] : register(t0, space2);
@@ -61,6 +60,8 @@ void main_vs(
     out VSOutput vsOutput
 )
 {
+    float3x4 transform = t_InstanceData[g_Instance.instance].transform;
+
     InstanceData instance = t_InstanceData[g_Instance.instance];
     GeometryData geometry = t_GeometryData[instance.firstGeometryIndex + g_Instance.geometryInMesh];
 
@@ -69,43 +70,44 @@ void main_vs(
 
     uint index = indexBuffer.Load(geometry.indexOffset + i_vertexID * 4);
 
-    float4 objectSpacePosition = float4(asfloat(vertexBuffer.Load3(geometry.positionOffset + index * c_SizeOfPosition)), 1.0);
-    float3 objectSpaceNormal = asfloat(vertexBuffer.Load3(geometry.normalOffset + index * c_SizeOfNormal));
+    float3 objectSpacePosition = asfloat(vertexBuffer.Load3(geometry.positionOffset + index * c_SizeOfPosition));
+    uint packedNormal = vertexBuffer.Load(geometry.normalOffset + index * c_SizeOfNormal);
+    float3 objectSpaceNormal = Unpack_RGB8_SNORM(packedNormal);
 
-    vsOutput.position = objectSpacePosition;
+    vsOutput.position = mul(objectSpacePosition, transform); // World space position
     vsOutput.normal = objectSpaceNormal;
 }
 
 struct GSOutput
 {
     float4 position : SV_POSITION;
-    float3 color : COLOR0;
+    float4 color : COLOR0;
 };
 
 [maxvertexcount(6)]
 void main_gs(
-    triangle VSOutput i_gsIn[3],
+    triangle VSOutput i_tri[3],
     inout LineStream<GSOutput> outStream
 )
 {
-    float normalLength = 0.02;
+    float normalLength = 0.05;
     float3x4 transform = t_InstanceData[g_Instance.instance].transform;
 
     for (int i = 0; i < 3; ++i)
     {
         //float3 pos
-        float3 localPos = i_gsIn[i].position.xyz;
-        float3 localNormal = i_gsIn[i].normal.xyz;
+        float3 worldPos = i_tri[i].position.xyz;
+        float3 localNormal = i_tri[i].normal.xyz;
 
         // point of line (p0)
         GSOutput output = (GSOutput)0;
-        output.position = mul(mul(float4(localPos, 1.0), transform), g_View.matWorldToClip);
-        output.color = float3(1.0, 0.0, 0.0);
+        output.position = mul(float4(worldPos, 1), g_View.matWorldToClip);
+        output.color = float4(1.0, 0.0, 0.0, 1.0);
         outStream.Append(output);
 
         // point of line (p1)
-        output.position = mul(mul(float4(localPos + localNormal * normalLength, 1.0), transform), g_View.matWorldToClip);
-        output.color = float3(0.0, 0.0, 1.0);
+        output.position = mul(float4(worldPos + localNormal * normalLength, 1), g_View.matWorldToClip);
+        output.color = float4(0.0, 0.0, 1.0, 1.0);
         outStream.Append(output);
 
         outStream.RestartStrip();
@@ -113,9 +115,10 @@ void main_gs(
 }
 
 void main_ps(
-    float3 i_color : COLOR0,
+    float4 i_position : SV_POSITION,
+    float4 i_color : COLOR0,
     out float4 o_color : SV_Target0
 )
 {
-    o_color = float4(i_color, 1.0);
+    o_color = i_color;
 }

@@ -45,11 +45,9 @@ static const char* g_WindowTitle = "My Devs : Geometry Pipeline";
 
 namespace MyDevs
 {
-
     struct RenderingPassBase
     {
         nvrhi::BindingLayoutHandle bindingLayout;
-        nvrhi::BindingLayoutHandle bindlessLayout;
         nvrhi::BindingSetHandle bindingSet;
         nvrhi::ShaderHandle vertexShader;
         nvrhi::ShaderHandle pixelShader;
@@ -58,21 +56,10 @@ namespace MyDevs
 
     struct ForwardPass : RenderingPassBase
     {
-        ForwardPass(nvrhi::IDevice* device, std::shared_ptr<engine::ShaderFactory> shaderFactory, std::shared_ptr<engine::
-            CommonRenderPasses> commonPasses, const nvrhi::BindingSetDesc& bindingSetDesc)
+        ForwardPass(nvrhi::IDevice* device, std::shared_ptr<engine::ShaderFactory> shaderFactory, const nvrhi::BindingSetDesc& bindingSetDesc)
         {
             vertexShader = shaderFactory->CreateShader("/shaders/app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
             pixelShader = shaderFactory->CreateShader("/shaders/app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
-
-            nvrhi::BindlessLayoutDesc bindlessLayoutDesc;
-            bindlessLayoutDesc.visibility = nvrhi::ShaderType::All;
-            bindlessLayoutDesc.firstSlot = 0;
-            bindlessLayoutDesc.maxCapacity = 1024;
-            bindlessLayoutDesc.registerSpaces = {
-                nvrhi::BindingLayoutItem::RawBuffer_SRV(1),
-                nvrhi::BindingLayoutItem::Texture_SRV(2)
-            };
-            bindlessLayout = device->createBindlessLayout(bindlessLayoutDesc);
 
             nvrhi::utils::CreateBindingSetAndLayout(device, nvrhi::ShaderType::All, 0, bindingSetDesc, bindingLayout, bindingSet);
         }		
@@ -80,41 +67,34 @@ namespace MyDevs
     struct GeometryPass : RenderingPassBase
     {
         nvrhi::ShaderHandle geometryShader;
-        GeometryPass(nvrhi::IDevice* device, std::shared_ptr<engine::ShaderFactory> shaderFactory, std::shared_ptr<engine::
-            CommonRenderPasses> commonPasses, const nvrhi::BindingSetDesc& bindingSetDesc)
+        GeometryPass(nvrhi::IDevice* device, std::shared_ptr<engine::ShaderFactory> shaderFactory, const nvrhi::BindingSetDesc& bindingSetDesc)
         {
             vertexShader = shaderFactory->CreateShader("/shaders/app/normal_debug.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+            geometryShader = shaderFactory->CreateShader("/shaders/app/normal_debug.hlsl", "main_gs", nullptr, nvrhi::ShaderType::Geometry);
             pixelShader = shaderFactory->CreateShader("/shaders/app/normal_debug.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
-            nvrhi::BindlessLayoutDesc bindlessLayoutDesc;
-            bindlessLayoutDesc.visibility = nvrhi::ShaderType::All;
-            bindlessLayoutDesc.firstSlot = 0;
-            bindlessLayoutDesc.maxCapacity = 1024;
-            bindlessLayoutDesc.registerSpaces = {
-                nvrhi::BindingLayoutItem::RawBuffer_SRV(1),
-                nvrhi::BindingLayoutItem::Texture_SRV(2)
-            };
-            bindlessLayout = device->createBindlessLayout(bindlessLayoutDesc);
-
             nvrhi::utils::CreateBindingSetAndLayout(device, nvrhi::ShaderType::All, 0, bindingSetDesc, bindingLayout, bindingSet);
-        }		
+        }
     };
 
 };
 class BindlessRendering : public app::ApplicationBase
 {
 private:
+    enum BINDING_TYPE {PLANER_VIEW_CBV, INSTANCES_PUSHCONSTANT, INSTANCE_DATA_SRV, GEOMETRY_DATA_SRV, MATERIALS_SRV, SAMPLER, BINDING_TYPE_NUM};
     std::shared_ptr<vfs::RootFileSystem> m_RootFS;
 
     nvrhi::CommandListHandle m_CommandList;
     nvrhi::BindingLayoutHandle m_BindingLayout;
     nvrhi::BindingLayoutHandle m_BindlessLayout;
     nvrhi::BindingSetHandle m_BindingSet;
+    nvrhi::BindingSetItem m_BindingSetItems[BINDING_TYPE_NUM]{};
     nvrhi::ShaderHandle m_VertexShader;
     nvrhi::ShaderHandle m_PixelShader;
     nvrhi::GraphicsPipelineHandle m_ForwardPassPipeline;
     nvrhi::GraphicsPipelineHandle m_GeometryPassPipeline;
     std::unique_ptr<MyDevs::ForwardPass> m_ForwardPass;
+    std::unique_ptr<MyDevs::GeometryPass> m_GeometryPass;
 
     nvrhi::BufferHandle m_ViewConstants;
 
@@ -146,9 +126,6 @@ public:
         m_CommonPasses = std::make_shared<engine::CommonRenderPasses>(GetDevice(), m_ShaderFactory);
         m_BindingCache = std::make_unique<engine::BindingCache>(GetDevice());
 
-        m_VertexShader = m_ShaderFactory->CreateShader("/shaders/app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-        m_PixelShader = m_ShaderFactory->CreateShader("/shaders/app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
-
         nvrhi::BindlessLayoutDesc bindlessLayoutDesc;
         bindlessLayoutDesc.visibility = nvrhi::ShaderType::All;
         bindlessLayoutDesc.firstSlot = 0;
@@ -175,22 +152,26 @@ public:
         m_Camera.SetMoveSpeed(3.f);
 
         m_ViewConstants = GetDevice()->createBuffer(nvrhi::utils::CreateVolatileConstantBufferDesc(sizeof(PlanarViewConstants), "ViewConstants", engine::c_MaxRenderPassConstantBufferVersions));
-
+        
         GetDevice()->waitForIdle();
 
         nvrhi::BindingSetDesc bindingSetDesc;
-        bindingSetDesc.bindings = {
-            nvrhi::BindingSetItem::ConstantBuffer(0, m_ViewConstants), // PlanarViewConstants
-            nvrhi::BindingSetItem::PushConstants(1, sizeof(int2)), // InstanceConstants
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_Scene->GetInstanceBuffer()), // InstanceData
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(1, m_Scene->GetGeometryBuffer()), // GeometryData
-            nvrhi::BindingSetItem::StructuredBuffer_SRV(2, m_Scene->GetMaterialBuffer()), // MaterialConstants
-            nvrhi::BindingSetItem::Sampler(0, m_CommonPasses->m_AnisotropicWrapSampler)
-        };
+        m_BindingSetItems[BINDING_TYPE::PLANER_VIEW_CBV] = nvrhi::BindingSetItem::ConstantBuffer(0, m_ViewConstants); // PlanarViewConstants
+        m_BindingSetItems[BINDING_TYPE::INSTANCES_PUSHCONSTANT] = nvrhi::BindingSetItem::PushConstants(1, sizeof(int2)); // InstanceConstants
+        m_BindingSetItems[BINDING_TYPE::INSTANCE_DATA_SRV] = nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_Scene->GetInstanceBuffer()); // InstanceData
+        m_BindingSetItems[BINDING_TYPE::GEOMETRY_DATA_SRV] = nvrhi::BindingSetItem::StructuredBuffer_SRV(1, m_Scene->GetGeometryBuffer()); // GeometryData
+        m_BindingSetItems[BINDING_TYPE::MATERIALS_SRV] = nvrhi::BindingSetItem::StructuredBuffer_SRV(2, m_Scene->GetMaterialBuffer()); // MaterialConstants
+        m_BindingSetItems[BINDING_TYPE::SAMPLER] = nvrhi::BindingSetItem::Sampler(0, m_CommonPasses->m_AnisotropicWrapSampler);
+        bindingSetDesc.bindings.assign(m_BindingSetItems, m_BindingSetItems + BINDING_TYPE_NUM);
+
+        m_ForwardPass = std::make_unique<MyDevs::ForwardPass>(GetDevice(), m_ShaderFactory, bindingSetDesc);
+        bindingSetDesc.bindings.clear();
+        bindingSetDesc.bindings.emplace_back(m_BindingSetItems[BINDING_TYPE::PLANER_VIEW_CBV]);
+        bindingSetDesc.bindings.emplace_back(m_BindingSetItems[BINDING_TYPE::INSTANCES_PUSHCONSTANT]);
+        bindingSetDesc.bindings.emplace_back(m_BindingSetItems[BINDING_TYPE::INSTANCE_DATA_SRV]);
+        bindingSetDesc.bindings.emplace_back(m_BindingSetItems[BINDING_TYPE::GEOMETRY_DATA_SRV]);
         nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_BindingLayout, m_BindingSet);
-
-        m_ForwardPass = std::make_unique<MyDevs::ForwardPass>(GetDevice(), m_ShaderFactory, m_CommonPasses, bindingSetDesc);
-
+        m_GeometryPass = std::make_unique<MyDevs::GeometryPass>(GetDevice(), m_ShaderFactory, bindingSetDesc);
         return true;
     }
 
@@ -279,7 +260,7 @@ public:
             pipelineDesc.VS = m_ForwardPass->vertexShader;
             pipelineDesc.PS = m_ForwardPass->pixelShader;
             pipelineDesc.primType = nvrhi::PrimitiveType::TriangleList;
-            pipelineDesc.bindingLayouts = { m_ForwardPass->bindingLayout, m_ForwardPass->bindlessLayout };
+            pipelineDesc.bindingLayouts = { m_ForwardPass->bindingLayout, m_BindlessLayout };
             pipelineDesc.renderState.depthStencilState.depthTestEnable = true;
             pipelineDesc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::GreaterOrEqual;
             pipelineDesc.renderState.rasterState.frontCounterClockwise = true;
@@ -287,19 +268,21 @@ public:
             m_ForwardPass->renderingPipeline = GetDevice()->createGraphicsPipeline(pipelineDesc, m_Framebuffers[fbindex]);
         }
 
-        //if (!m_GeometryPassPipeline)
-        //{
-        //    nvrhi::GraphicsPipelineDesc pipelineDesc;
-        //    pipelineDesc.VS = m_VertexShader;
-        //    pipelineDesc.PS = m_PixelShader;
-        //    pipelineDesc.primType = nvrhi::PrimitiveType::TriangleList;
-        //    pipelineDesc.bindingLayouts = { m_BindingLayout, m_BindlessLayout };
-        //    pipelineDesc.renderState.depthStencilState.depthTestEnable = true;
-        //    pipelineDesc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::GreaterOrEqual;
-        //    pipelineDesc.renderState.rasterState.frontCounterClockwise = true;
-        //    pipelineDesc.renderState.rasterState.setCullBack();
-        //    m_GeometryPassPipeline = GetDevice()->createGraphicsPipeline(pipelineDesc, m_Framebuffers[fbindex]);
-        //}
+        if (m_GeometryPass->renderingPipeline == nullptr)
+        {
+            nvrhi::GraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.VS = m_GeometryPass->vertexShader;
+            pipelineDesc.GS = m_GeometryPass->geometryShader;
+            pipelineDesc.PS = m_GeometryPass->pixelShader;
+            pipelineDesc.primType = nvrhi::PrimitiveType::TriangleList;
+            pipelineDesc.bindingLayouts = { m_GeometryPass->bindingLayout, m_BindlessLayout };
+            pipelineDesc.renderState.depthStencilState.depthTestEnable = true;
+            pipelineDesc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::GreaterOrEqual;
+            pipelineDesc.renderState.rasterState.frontCounterClockwise = true;
+            pipelineDesc.renderState.rasterState.setCullBack();
+            m_GeometryPass->renderingPipeline = GetDevice()->createGraphicsPipeline(pipelineDesc, m_Framebuffers[fbindex]);
+
+        }
 
         nvrhi::Viewport windowViewport(float(fbinfo.width), float(fbinfo.height));
         m_View.SetViewport(windowViewport);
@@ -316,6 +299,7 @@ public:
         m_View.FillPlanarViewConstants(viewConstants);
         m_CommandList->writeBuffer(m_ViewConstants, &viewConstants, sizeof(viewConstants));
 
+        // Forward Pass
         nvrhi::GraphicsState state;
         state.pipeline = m_ForwardPass->renderingPipeline;
         state.framebuffer = m_Framebuffers[fbindex];
@@ -339,6 +323,26 @@ public:
             }
         }
 
+
+        // Geometry Pass
+        state.pipeline = m_GeometryPass->renderingPipeline;
+        state.bindings = { m_GeometryPass->bindingSet, m_DescriptorTableManager->GetDescriptorTable() };
+        m_CommandList->setGraphicsState(state);
+        for (const auto& instance : m_Scene->GetSceneGraph()->GetMeshInstances())
+        {
+            const auto& mesh = instance->GetMesh();
+
+            for (size_t i = 0; i < mesh->geometries.size(); i++)
+            {
+                int2 constants = int2(instance->GetInstanceIndex(), int(i));
+                m_CommandList->setPushConstants(&constants, sizeof(constants));
+
+                nvrhi::DrawArguments args;
+                args.instanceCount = 1;
+                args.vertexCount = mesh->geometries[i]->numIndices;
+                m_CommandList->draw(args);
+            }
+        }
         m_CommandList->close();
         GetDevice()->executeCommandList(m_CommandList);
     }
